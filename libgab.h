@@ -30,9 +30,27 @@
 #include <dirent.h>
 #include <gzstream.h>
 #include <errno.h>
+#ifndef _WIN32
 #include <sys/resource.h>
 #include <pwd.h>
+#endif
 
+#if defined _WIN32
+#include <string>
+#include <windows.h>
+#include <direct.h>
+#include <io.h> 
+#define drand48() (((double)rand())/((double)RAND_MAX))
+
+void srand48(long int seedval) {
+    srand(seedval);
+}
+
+long int mrand48(void) {
+    return rand() > RAND_MAX / 2 ? rand() : -rand();
+}
+
+#endif
 
 using namespace std;
 
@@ -1356,16 +1374,32 @@ inline vector<T>  vectorDist(const vector<T> & toEvaluate){
     return toReturn;
 }
 
-inline char * getRealpath(const char *arg){
-    int pathmaxtouse=1024;//under MacOS, PATH_MAX is defined to be 1024 in /usr/include/sys/syslimits.h
-    
+inline char * getRealpath(const char *arg) {
+    int pathmaxtouse = 1024; // Default value
+
 #ifdef PATH_MAX
-    pathmaxtouse=PATH_MAX;//if the max # of bytes is a path is defined
+    pathmaxtouse = PATH_MAX; // If PATH_MAX is defined, use that value
 #endif
+
+#ifdef _WIN32
+    // Windows implementation using GetFullPathName
+    char *actualpath = (char *)malloc(MAX_PATH); // Allocate memory for the path
+    if (actualpath == NULL) {
+        return NULL; // Handle memory allocation failure
+    }
     
-    char actualpath [pathmaxtouse+1];
-    char * returnRealpath = realpath(arg, actualpath);
-    return returnRealpath;    
+    DWORD result = GetFullPathName(arg, MAX_PATH, actualpath, NULL);
+    if (result == 0 || result > MAX_PATH) {
+        free(actualpath); // Clean up in case of error
+        return NULL;
+    }
+    return actualpath;
+#else
+    // POSIX implementation using realpath
+    char actualpath[pathmaxtouse + 1];
+    char *returnRealpath = realpath(arg, actualpath);
+    return returnRealpath;
+#endif
 }
 
 inline char * getENV(const char *arg){
@@ -1404,44 +1438,81 @@ inline string getCWD(const char *arg){
     }
 }
 
-inline string getHomeDir(){
+inline string getHomeDir() {
+#ifdef _WIN32
+    // Windows implementation using USERPROFILE environment variable
+    const char* homedir = getenv("USERPROFILE");
+    if (homedir == NULL) {
+        homedir = getenv("HOMEDRIVE");
+        if (homedir != NULL) {
+            string drive(homedir);
+            const char* path = getenv("HOMEPATH");
+            if (path != NULL) {
+                return drive + string(path);
+            }
+        }
+        return ""; // Return empty string if we can't find the home directory
+    }
+    return string(homedir);
+#else
+    // POSIX implementation using getpwuid and getuid
     struct passwd *pw = getpwuid(getuid());
     const char *homedir = pw->pw_dir;
     return string(homedir);
+#endif
 }
 
-inline string getFullPath(const string & st){
-    vector<string> token=allTokens( st,'/');
-    //sub the ~ for the home dir
-    for(unsigned int i=0;i<token.size();i++)  
-	if(token[i] == "~")  
-	    token[i]=getHomeDir();
-    string stT=vectorToString(token,"/");
-    int pathmaxtouse=1024;//under MacOS, PATH_MAX is defined to be 1024 in /usr/include/sys/syslimits.h
+inline string getFullPath(const string &st) {
+    vector<string> token = allTokens(st, '/');
     
-#ifdef PATH_MAX
-    pathmaxtouse=PATH_MAX;//if the max # of bytes is a path is defined
-#endif
-    
-    char actualpath [pathmaxtouse+1];
-    char * returnRealpath = realpath(stT.c_str(), actualpath);
-    
-    if(returnRealpath == NULL){
-	cerr<<"libgab.h getFullPath failed on "<<st<<endl;
-	exit(1);
+    // Substitute '~' for the home directory
+    for (unsigned int i = 0; i < token.size(); i++) {
+        if (token[i] == "~")
+            token[i] = getHomeDir();
     }
 
-    if(isDirectory(actualpath)){
-	token=allTokens( string(actualpath),'/');
+    string stT = vectorToString(token, "/");
     
-	if(strEndsWith(vectorToString(token,"/"),"/")){
-	    return vectorToString(token,"/");
-	}else{
-	    return vectorToString(token,"/")+"/";
-	}
-    }else
-	return actualpath;
+    // Define pathmaxtouse based on the system
+    int pathmaxtouse = 1024;
+
+#ifdef PATH_MAX
+    pathmaxtouse = PATH_MAX;
+#endif
+
+#ifdef _WIN32
+    // Windows equivalent for realpath using GetFullPathName
+    char actualpath[MAX_PATH + 1];
+    DWORD result = GetFullPathName(stT.c_str(), MAX_PATH, actualpath, NULL);
+    if (result == 0 || result > MAX_PATH) {
+        cerr << "libgab.h getFullPath failed on " << st << endl;
+        exit(1);
+    }
+#else
+    // POSIX version using realpath
+    char actualpath[pathmaxtouse + 1];
+    char *returnRealpath = realpath(stT.c_str(), actualpath);
+    
+    if (returnRealpath == NULL) {
+        cerr << "libgab.h getFullPath failed on " << st << endl;
+        exit(1);
+    }
+#endif
+
+    // Directory check
+    if (isDirectory(actualpath)) {
+        token = allTokens(string(actualpath), '/');
+    
+        if (strEndsWith(vectorToString(token, "/"), "/")) {
+            return vectorToString(token, "/");
+        } else {
+            return vectorToString(token, "/") + "/";
+        }
+    } else {
+        return string(actualpath);
+    }
 }
+
 
 
 inline pair<double,double> computeMeanSTDDEV(const vector<double> & v){
@@ -1846,62 +1917,62 @@ inline string runCmdAndCaptureSTDOUTandSTDERR(string cmd) {//sorry for the long 
 
 
 
-inline int returnOpenFileDescriptors(){
-    struct stat   statFD;
-
-    string        toReturn="";
-
-    int fileDMAX = getdtablesize();
-     
+inline int returnOpenFileDescriptors() {
+#ifdef _WIN32
+    // Windows does not provide an easy way to list all open file descriptors,
+    // so we'll simply return -1 as a placeholder or some arbitrary logic
+    // for tracking open files would need to be implemented.
+    return -1;  // Placeholder: Windows doesn't easily expose this information.
+#else
+    struct stat statFD;
     int currentFD = 0;
-    for(int i=0;i<=fileDMAX; i++ ) {
-	int statusFS=fstat(i, &statFD);
+    int fileDMAX = getdtablesize();
 
-	if(statusFS == -1)
-	    break;
-	
-	//if(errno != EBADF) 
-	currentFD++;	
+    for (int i = 0; i <= fileDMAX; i++) {
+        if (fstat(i, &statFD) != -1) {
+            currentFD++;  // Count open file descriptors
+        }
     }
     return currentFD;
+#endif
 }
 
-inline int returnOpenFileDescriptorsMax(){
-
-    int fileDMAX = getdtablesize();
-    return fileDMAX;
-
+inline int returnOpenFileDescriptorsMax() {
+#ifdef _WIN32
+    return _getmaxstdio();  // Returns the maximum number of file descriptors (usually 512 or 2048)
+#else
+    return getdtablesize();  // POSIX: Returns the maximum number of file descriptors
+#endif
 }
 
 
-inline string returnFileDescriptorStats(){
-    struct stat   statFD;
+inline std::string returnFileDescriptorStats() {
+    std::string toReturn = "";
+    
+#ifdef _WIN32
+    int maxFD = _getmaxstdio();
+    toReturn += "fds max. lim            :\t" + std::to_string(maxFD) + "\n";
+    // Placeholder for other stats (Windows doesn't provide exact equivalents of RLIMIT_NOFILE)
+#else
+    struct stat statFD;
     struct rlimit rlimitFD;
-    string        toReturn="";
-
     int fileDMAX = getdtablesize();
-     
     int currentFD = 0;
-    for(int i=0;i<=fileDMAX; i++ ) {
-	int statusFS=fstat(i, &statFD);
 
-	if(statusFS == -1)
-	    break;
-	
-	//if(errno != EBADF) 
-	currentFD++;	
+    for (int i = 0; i <= fileDMAX; i++) {
+        if (fstat(i, &statFD) != -1) {
+            currentFD++;
+        }
     }
-     
-    toReturn+=
-	"fds currently open      :\t"+stringify(currentFD)+"\t"+
-	"fds max. lim            :\t"+stringify(fileDMAX)+"\t";
+
+    toReturn += "fds currently open      :\t" + std::to_string(currentFD) + "\n";
+    toReturn += "fds max. lim            :\t" + std::to_string(fileDMAX) + "\n";
 
     getrlimit(RLIMIT_NOFILE, &rlimitFD);
+    toReturn += "resource current limit  :\t" + std::to_string(rlimitFD.rlim_cur) + "\n";
+    toReturn += "resource max limit fds  :\t" + std::to_string(rlimitFD.rlim_max) + "\n";
+#endif
 
-    toReturn+=
-	"resource currrent limit :\t"+stringify(rlimitFD.rlim_cur) +"\t"+
-	"resource max limit fds  :\t"+stringify(rlimitFD.rlim_max);
-    
     return toReturn;
 }
 
